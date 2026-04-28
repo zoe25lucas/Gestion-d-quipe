@@ -843,20 +843,23 @@ const UNITES_PAR_AGENCE={"Agence Richwiller":["MSI","ELAL","CANA"],"Agence Kraut
 const PALETTE=["#3B6D11","#1A3C5E","#854F0B","#993556","#0F6E56","#993C1D","#4A2D99","#1A6B6B","#8A4800","#5A1A6B","#B8860B","#C8001E","#444"];
 const PALETTE_BG={"#3B6D11":"#EAF3DE","#1A3C5E":"#E8F0F8","#854F0B":"#FAEEDA","#993556":"#FBEAF0","#0F6E56":"#E1F5EE","#993C1D":"#FAECE7","#4A2D99":"#EDE8FB","#1A6B6B":"#E0F5F5","#8A4800":"#FAF0E0","#5A1A6B":"#F5E8FA","#B8860B":"#FBF5DC","#C8001E":"#FEE8EC","#444":"#F0F0F0"};
 
-function loadPostes(){
-  try{const s=localStorage.getItem("sogea_postes2");if(s)return JSON.parse(s);}catch(e){}
-  return [
-    {id:"chef",nom:"Chef de chantier",color:"#3B6D11",niveaux:[]},
-    {id:"macon",nom:"Aide-maçon",color:"#1A3C5E",niveaux:[]},
-    {id:"elec",nom:"Électricien",color:"#854F0B",niveaux:["N1","N2","N3"]},
-    {id:"plomb",nom:"Plombier",color:"#993556",niveaux:[]},
-    {id:"carp",nom:"Charpentier",color:"#0F6E56",niveaux:[]},
-    {id:"pein",nom:"Peintre",color:"#993C1D",niveaux:[]},
-    {id:"canal",nom:"Canalisateur",color:"#4A2D99",niveaux:["Niveau 0","Niveau 1","Niveau 2","Niveau 3"]},
-  ];
+async function loadPostes(){
+  try{
+    const d=await sbFetch("postes?order=created_at.asc");
+    postes=(d||[]).map(p=>({id:p.id,nom:p.nom,color:p.color||"#444",niveaux:p.niveaux||[]}));
+  }catch(e){console.error("loadPostes",e);}
 }
-function savePostes(p){localStorage.setItem("sogea_postes2",JSON.stringify(p));}
-let postes=loadPostes();
+async function savePoste_sb(p){
+  await sbFetch("postes?on_conflict=id",{
+    method:"POST",
+    headers:{...HEADERS,"Prefer":"resolution=merge-duplicates,return=representation"},
+    body:JSON.stringify({id:p.id,nom:p.nom,color:p.color,niveaux:p.niveaux})
+  });
+}
+async function deletePoste_sb(id){
+  await sbFetch(`postes?id=eq.${encodeURIComponent(id)}`,{method:"DELETE"});
+}
+let postes=[];
 let employees=[],editingId=null,editingPosteId=null,selectedSwatchColor=PALETTE[0];
 let map,empMarkers=[],chantierMarker=null,activeRouteLines=[],focusedEmpId=null;
 // besoins = [{poste, niveau, qty}]
@@ -1604,11 +1607,13 @@ function addNiveau(posteId){
     if(p.id!==posteId||p.niveaux.includes(val))return p;
     return{...p,niveaux:[...p.niveaux,val]};
   });
-  savePostes(postes);inp.value="";renderPostesGrid();
+  const p=postes.find(x=>x.id===posteId);if(p)savePoste_sb(p).catch(console.error);
+  inp.value="";renderPostesGrid();
 }
 function deleteNiveau(posteId,niveau){
   postes=postes.map(p=>p.id!==posteId?p:{...p,niveaux:p.niveaux.filter(n=>n!==niveau)});
-  savePostes(postes);renderPostesGrid();
+  const p=postes.find(x=>x.id===posteId);if(p)savePoste_sb(p).catch(console.error);
+  renderPostesGrid();
 }
 function initColorSwatches(currentColor){
   const wrap=document.getElementById("color-swatches");
@@ -1630,20 +1635,23 @@ function openPosteModal(id){
   document.getElementById("poste-modal-overlay").classList.add("open");
 }
 function closePosteModal(){document.getElementById("poste-modal-overlay").classList.remove("open");editingPosteId=null;}
-function savePoste(){
+async function savePoste(){
   const nom=document.getElementById("p-nom").value.trim();
   const errEl=document.getElementById("poste-form-error");
   if(!nom){errEl.textContent="Le nom du poste est obligatoire.";errEl.className="form-error show";return;}
-  if(editingPosteId){postes=postes.map(p=>p.id===editingPosteId?{...p,nom,color:selectedSwatchColor}:p);}
-  else{postes.push({id:"p_"+Date.now(),nom,color:selectedSwatchColor,niveaux:[]});}
-  savePostes(postes);closePosteModal();renderPostesGrid();
+  let p;
+  if(editingPosteId){postes=postes.map(x=>x.id===editingPosteId?{...x,nom,color:selectedSwatchColor}:x);p=postes.find(x=>x.id===editingPosteId);}
+  else{p={id:"p_"+Date.now(),nom,color:selectedSwatchColor,niveaux:[]};postes.push(p);}
+  try{await savePoste_sb(p);}catch(e){alert("Erreur : "+e.message);return;}
+  closePosteModal();renderPostesGrid();
 }
-function deletePoste(id){
+async function deletePoste(id){
   const p=postes.find(x=>x.id===id);if(!p)return;
   const cnt=employees.filter(e=>e.poste===p.nom).length;
   if(cnt>0){alert(`Impossible : ${cnt} employé(s) rattaché(s) à ce poste.`);return;}
   if(!confirm(`Supprimer le poste "${p.nom}" ?`))return;
-  postes=postes.filter(x=>x.id!==id);savePostes(postes);renderPostesGrid();
+  try{await deletePoste_sb(id);}catch(e){alert("Erreur : "+e.message);return;}
+  postes=postes.filter(x=>x.id!==id);renderPostesGrid();
 }
 
 // ── TABS ──────────────────────────────────────────────────────────────────────
@@ -1653,7 +1661,7 @@ function switchTab(tab){
   });
   ["map","emp","postes","chantiers","zones"].forEach(t=>document.getElementById("panel-"+t).classList.toggle("active",t===tab));
   if(tab==="emp")renderTable();
-  if(tab==="postes")loadEmployees().then(()=>renderPostesGrid());
+  if(tab==="postes"){loadPostes().then(()=>loadEmployees()).then(()=>renderPostesGrid());}
   if(tab==="map")setTimeout(()=>map&&map.invalidateSize(),50);
   if(tab==="chantiers"){renderChantiers();setChantierUniteFilter(activeChantierUnite);}
   if(tab==="zones")setTimeout(()=>{if(zMap)zMap.invalidateSize();else zInitMap();},80);
@@ -1692,14 +1700,49 @@ function setChantierUniteFilter(unite){
   renderChantiers();
 }
 
-function loadChantiers(){
-  try{const s=localStorage.getItem("sogea_chantiers2");if(s)return JSON.parse(s);}catch(e){}
-  return[];
+async function loadChantiers(){
+  try{
+    const d=await sbFetch("chantiers?order=created_at.desc");
+    // Supabase stocke team en JSONB, donc déjà parsé
+    chantiers=(d||[]).map(ch=>({
+      id:ch.id,
+      nom:ch.nom,
+      addr:ch.addr||"",
+      unite:ch.unite||"",
+      dateDebut:ch.date_debut||null,
+      dateFin:ch.date_fin||null,
+      notes:ch.notes||"",
+      team:ch.team||[],
+      createdAt:ch.created_at||new Date().toISOString()
+    }));
+    return chantiers;
+  }catch(e){console.error("loadChantiers",e);return[];}
 }
-function saveChantiers(){localStorage.setItem("sogea_chantiers2",JSON.stringify(chantiers));}
+async function saveChantier_sb(payload){
+  // Convertit les clés camelCase → snake_case pour Supabase
+  const row={
+    id:payload.id,
+    nom:payload.nom,
+    addr:payload.addr||null,
+    unite:payload.unite||null,
+    date_debut:payload.dateDebut||null,
+    date_fin:payload.dateFin||null,
+    notes:payload.notes||null,
+    team:payload.team||[]
+  };
+  // Upsert (insert ou update selon l'id)
+  await sbFetch("chantiers?on_conflict=id",{
+    method:"POST",
+    headers:{...HEADERS,"Prefer":"resolution=merge-duplicates,return=representation"},
+    body:JSON.stringify(row)
+  });
+}
+async function deleteChantier_sb(id){
+  await sbFetch(`chantiers?id=eq.${encodeURIComponent(id)}`,{method:"DELETE"});
+}
 
-function renderChantiers(){
-  chantiers=loadChantiers();
+async function renderChantiers(){
+  await loadChantiers();
   showChantiersList();
   const grid=document.getElementById("chantiers-grid");
   if(!grid)return;
@@ -1755,8 +1798,8 @@ function showChantiersList(){
   currentChantierId=null;
 }
 
-function showChantierDetail(id){
-  chantiers=loadChantiers();
+async function showChantierDetail(id){
+  await loadChantiers();
   const ch=chantiers.find(x=>x.id===id);
   if(!ch)return;
   currentChantierId=id;
@@ -1801,11 +1844,13 @@ function showChantierDetail(id){
 function editCurrentChantier(){if(currentChantierId)openChantierModal(currentChantierId);}
 function deleteCurrentChantier(){if(currentChantierId)deleteChantierById(currentChantierId,true);}
 
-function deleteChantierById(id,goBack=false){
+async function deleteChantierById(id,goBack=false){
   const ch=chantiers.find(x=>x.id===id);
   if(!ch||!confirm(`Supprimer le chantier "${ch.nom}" ?`))return;
-  chantiers=chantiers.filter(x=>x.id!==id);
-  saveChantiers();
+  try{
+    await deleteChantier_sb(id);
+    chantiers=chantiers.filter(x=>x.id!==id);
+  }catch(e){alert("Erreur suppression : "+e.message);return;}
   if(goBack)showChantiersList();
   renderChantiers();
 }
@@ -1973,7 +2018,8 @@ function goToMapForTeamAdd(){
   setBesoinsCollapsed(false);
   alert("Carte ouverte. Sélectionnez les profils puis cliquez sur 'Enregistrer l'équipe' pour revenir au chantier.");
 }
-function saveChantier(){
+
+async function saveChantier(){
   const nom=document.getElementById("c-nom").value.trim();
   const errEl=document.getElementById("chantier-form-error");
   if(!nom){errEl.textContent="Le nom du chantier est obligatoire.";errEl.className="form-error show";return;}
@@ -1995,7 +2041,7 @@ function saveChantier(){
   if(editingChantierId){chantiers=chantiers.map(x=>x.id===editingChantierId?payload:x);}
   else{chantiers.push(payload);}
   pendingChantierDraft=null;
-  saveChantiers();
+  try{await saveChantier_sb(payload);}catch(e){alert("Erreur enregistrement : "+e.message);return;}
   closeChantierModal();
   // Reset selected employees and map
   selectedEmpIds.clear();
@@ -2170,7 +2216,8 @@ function zDestinationPoint(start,distKm,brng){
 }
 
 window.addEventListener("load",async()=>{
-  chantiers=loadChantiers();
+  await loadPostes();
+  await loadChantiers();
   renderBesoinsRows();
   setBesoinsCollapsed(false);
   initMap();
